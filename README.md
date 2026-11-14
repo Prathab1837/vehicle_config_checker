@@ -1,40 +1,260 @@
 # Vehicle Config Checker
 
-FastAPI + LangGraph (plain Python nodes, no LLM) + PostgreSQL (SQLAlchemy 2.0 async) + Redis.
+## 1. Project Overview
 
-## Run (3 commands)
-```bash
-cp .env.example .env
-docker compose up --build -d
-open http://localhost:8000/docs        # Swagger UI
-```
-Run tests (no DB/Redis needed): `pip install -r requirements.txt && pytest`
+Vehicle Config Checker is a Python-based backend application that validates and automatically corrects three-wheeler vehicle configurations based on predefined engineering limits and cross-field rules.
 
-## Reproduce the worked example
-```bash
-curl -s -X POST localhost:8000/configs -H 'Content-Type: application/json' \
-  -d '{"vehicle_type":"3w_cargo","length":3000,"width":1600,"height":2050,"wheelbase":2200,"payload":500}'
+The application accepts vehicle dimensions, checks them against predefined limits stored in PostgreSQL, automatically adjusts invalid values wherever possible, and saves the final configuration.
+
+The validation and correction process is managed using LangGraph with a maximum of 3 iterations.
+
+**Important:** This project uses rule-based validation and correction. It does not use any LLM or AI model.
+
+## 2. Technologies Used
+
+- **Python 3.11+** – Backend programming language
+- **FastAPI** – Asynchronous REST API framework
+- **LangGraph** – Validation and adjustment workflow
+- **PostgreSQL** – Persistent database
+- **SQLAlchemy 2.0** – Asynchronous database operations
+- **Redis** – Caching vehicle limits
+- **Docker Compose** – Running PostgreSQL and Redis
+
+## 3. Project Structure
+
+```text
+vehicle_config_checker/
+│
+├── app/
+│   ├── main.py
+│   ├── database.py
+│   ├── models.py
+│   ├── schemas.py
+│   ├── state.py
+│   ├── graph.py
+│   ├── cache.py
+│   │
+│   ├── nodes/
+│   │   ├── load_limits.py
+│   │   ├── validate.py
+│   │   ├── adjust.py
+│   │   └── save.py
+│   │
+│   ├── init_db.py
+│   ├── seed_limits.py
+│   ├── test_graph.py
+│   └── test_redis.py
+│
+├── docker-compose.yml
+├── .gitignore
+└── README.md
 ```
-Response:
+
+## 4. Application Workflow
+
+1. Receive vehicle dimensions through the FastAPI endpoint.
+2. Retrieve vehicle limits from Redis.
+3. If the limits are not cached, retrieve them from PostgreSQL and cache them in Redis.
+4. Validate individual dimensions against their minimum and maximum limits.
+5. Validate cross-field engineering rules.
+6. Automatically adjust invalid values wherever possible.
+7. Repeat validation and adjustment for a maximum of 3 iterations.
+8. Save the input, final output, adjustment history, status and iteration count in PostgreSQL.
+
+## 5. Vehicle Configuration Limits
+
+Vehicle type: `3w_cargo`
+
+| Parameter | Minimum | Maximum | Unit |
+|---|---:|---:|---|
+| Length | 2800 | 3600 | mm |
+| Width | 1200 | 1500 | mm |
+| Height | 1700 | 2100 | mm |
+| Wheelbase | 1900 | 2300 | mm |
+| Payload | 300 | 700 | kg |
+
+### Cross-field Rules
+
+- **R1:** Wheelbase must be less than or equal to Length − 700.
+- **R2:** Height must be less than or equal to Width × 1.3.
+
+### Automatic Adjustment Rules
+
+- Values below the minimum are adjusted to the minimum.
+- Values above the maximum are adjusted to the maximum.
+- R1 violations are corrected by setting wheelbase to length − 700.
+- R2 violations are corrected by setting height to width × 1.3.
+- If a correction produces a value outside its own permitted limits, the configuration is rejected.
+- Maximum validation iterations: 3.
+
+## 6. API Endpoints
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| POST | `/configs` | Submit and validate vehicle configuration |
+| GET | `/configs/{id}` | Retrieve a saved configuration |
+| GET | `/configs` | List configurations with status filtering and pagination |
+| GET | `/limits/{vehicle_type}` | Retrieve vehicle limits |
+
+### Additional endpoints planned
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| PUT | `/limits/{vehicle_type}/{field}` | Update vehicle limits and invalidate Redis cache |
+
+## 7. Installation and Execution
+
+Run the following commands from the project directory using Ubuntu/WSL.
+
+**Command 1 – Start PostgreSQL and Redis**
+
+```bash
+sudo docker compose up -d
+```
+
+**Command 2 – Create and activate virtual environment**
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+```
+
+**Command 3 – Install dependencies**
+
+```bash
+pip install fastapi uvicorn sqlalchemy asyncpg redis langgraph pydantic
+```
+
+**Command 4 – Initialize database and insert default limits**
+
+```bash
+python -m app.init_db && python -m app.seed_limits
+```
+
+**Command 5 – Start FastAPI server**
+
+```bash
+uvicorn app.main:app --reload
+```
+
+Open the API documentation:
+
+http://127.0.0.1:8000/docs
+
+## 8. Example API Request
+
+**POST** `/configs`
+
 ```json
-{"id":1,"vehicle_type":"3w_cargo",
- "input":{"length":3000,"width":1600,"height":2050,"wheelbase":2200,"payload":500},
- "output":{"length":3000,"width":1500,"height":1950,"wheelbase":2200,"payload":500},
- "adjustments":[
-  {"iteration":1,"field":"width","rule":"range","from":1600,"to":1500},
-  {"iteration":2,"field":"height","rule":"R2","from":2050,"to":1950}],
- "status":"adjusted","iterations":3}
+{
+  "vehicle_type": "3w_cargo",
+  "length": 3000,
+  "width": 1600,
+  "height": 2050,
+  "wheelbase": 2200,
+  "payload": 500
+}
 ```
 
-## Design notes
-- `iterations` = number of validate passes (the final clean pass counts, so the example gives 3).
-- Status: `valid` (no fixes), `adjusted` (fixed and clean), `rejected` (a fix leaves its own limits, or still broken after 3 passes).
-- Pure logic lives in `app/rules.py`; graph wiring in `app/graph.py`; Redis/DB access in `app/service.py`.
-- Graph is compiled once at startup. Limits cached at `limits:{vehicle_type}`, TTL 10 min; `PUT /limits/...` deletes the key.
-- Tables are created and seeded on startup (`create_all`).
+### Expected Response
 
-## Finished
-All 5 endpoints, graph loop, Redis cache + invalidation, 422/404 handling, pytest for the graph, Docker Compose.
+```json
+{
+  "id": 1,
+  "status": "adjusted",
+  "output": {
+    "length": 3000,
+    "width": 1500,
+    "height": 1950,
+    "wheelbase": 2200,
+    "payload": 500
+  },
+  "adjustments": [
+    {
+      "iteration": 1,
+      "field": "width",
+      "rule": "max",
+      "from": 1600,
+      "to": 1500
+    },
+    {
+      "iteration": 2,
+      "field": "height",
+      "rule": "R2",
+      "from": 2050,
+      "to": 1950
+    }
+  ],
+  "iterations": 3
+}
+```
 
-## Skipped
-Alembic migrations (startup `create_all` used instead to keep it simple); API-level integration tests.
+*The example ID is illustrative; the actual ID is generated by the database.*
+
+## 9. Database Tables
+
+### proportion_limits
+
+Stores predefined vehicle configuration limits.
+
+- id
+- vehicle_type
+- field
+- min_value
+- max_value
+- unit
+
+### vehicle_configs
+
+Stores submitted and processed vehicle configurations.
+
+- id
+- vehicle_type
+- input (JSONB)
+- output (JSONB)
+- adjustments (JSONB)
+- status
+- iterations
+- created_at
+
+## 10. Project Completion Status
+
+### Implemented and tested
+
+- FastAPI application
+- PostgreSQL database connection
+- Database table creation
+- Default vehicle limit insertion
+- Redis connection and caching
+- LangGraph validation workflow
+- Automatic adjustment logic
+- Maximum 3 iteration control
+- Saving processed configurations
+- POST `/configs`
+- GET `/configs/{id}`
+- GET `/configs` with filtering and pagination
+- GET `/limits/{vehicle_type}`
+
+### Pending implementation and verification
+
+- PUT endpoint for updating vehicle limits
+- Redis cache invalidation after limit updates
+- Proper unknown vehicle type handling in POST `/configs`
+- Final invalid-input and rejected-configuration tests
+- Comprehensive pytest test suite
+
+### Not implemented
+
+- Alembic database migrations
+- Production deployment configuration
+
+These features are pending or omitted; they should not be considered completed.
+
+## 11. Security Notes
+
+- Do not commit `.env` files, passwords, API tokens or other secrets.
+- Use environment variables for database credentials.
+- The credentials in the local Docker Compose configuration are for development only.
+
+## 12. Conclusion
+
+Vehicle Config Checker provides a rule-based approach to vehicle dimension validation and automatic correction. It combines FastAPI, LangGraph, PostgreSQL and Redis to create an asynchronous backend service that validates vehicle configurations, records adjustments and stores the final results.
